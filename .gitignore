@@ -1,0 +1,7 @@
+mr_signals_*.csv
+mr_outcomes_*.csv
+kap_debug.html
+midas_debug.html
+__pycache__/
+*.pyc
+.DS_Store
