@@ -38,6 +38,14 @@ Each signal captures a rich set of features for analysis:
 | `rsi14` | 14-period RSI |
 | `position` | Price location: Above both, Below both, Between |
 | `above_count`, `below_count` | Signal clustering — total ABOVE/BELOW signals on the same day |
+| `stale` | Oversold-duration proxy = `\|gap50\| − \|gap20\|`. A fresh drop leaves the two gaps similar (≈0 / negative); a prolonged drop lets the fast EMA20 catch up to price, so `\|gap50\| ≫ \|gap20\|` (positive). Higher = staler dip |
+| `mr_score` | Stock-specific mean-reversion tendency: mean tradable return (enter d1 open → exit d5 close) over this ticker's own prior **resolved** BELOW signals |
+| `mr_score_exc` | Same as `mr_score`, but on each prior signal's *excess* over that day's universe-mean BELOW return (removes market drift) |
+| `mr_n` | Number of prior resolved signals behind the score (confidence / sample size) |
+
+All columns are raw descriptive values — the scanner writes no buy/sell, tier, or edge labels; any classification is left to the analysis layer.
+
+**Look-ahead safety of `mr_score`:** the score for a ticker is built only from its signals whose d5 outcome is already known at scan time. A just-created signal has no d5 yet, so it is excluded automatically — the score never sees its own future. New or rarely-signalling tickers get a blank score and `mr_n = 0`; the score becomes meaningful only as resolved history accrues.
 
 ## Outcome Tracking
 

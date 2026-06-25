@@ -38,6 +38,14 @@ Her sinyal analiz için zengin bir veri seti ile kaydedilir:
 | `rsi14` | 14 periyotluk RSI |
 | `position` | Fiyatın konumu: Above both, Below both, Between |
 | `above_count`, `below_count` | Sinyal yoğunluğu — aynı gün toplam ABOVE/BELOW sinyal sayısı |
+| `stale` | Oversold süresi vekili = `\|gap50\| − \|gap20\|`. Taze düşüşte iki gap benzerdir (≈0 / negatif); uzun süren düşüşte hızlı EMA20 fiyatı yakaladığı için `\|gap50\| ≫ \|gap20\|` (pozitif) olur. Yüksek = daha bayat dip |
+| `mr_score` | Hisseye özel ortalamaya dönüş eğilimi: bu hissenin kendi önceki **çözülmüş** BELOW sinyallerindeki ortalama işlenebilir getiri (d1 açılışı → d5 kapanışı) |
+| `mr_score_exc` | `mr_score` ile aynı, ancak her önceki sinyalin o günkü evren-ortalaması BELOW getirisine göre *fazlası* üzerinden (piyasa sürüklenmesini arındırır) |
+| `mr_n` | Skorun arkasındaki önceki çözülmüş sinyal sayısı (güven / örneklem boyutu) |
+
+Tüm kolonlar ham tanımlayıcı değerlerdir — tarayıcı al/sat, kademe (tier) veya edge etiketi yazmaz; sınıflandırma analiz katmanına bırakılır.
+
+**`mr_score` ve look-ahead güvenliği:** Bir hissenin skoru, yalnızca d5 sonucu tarama anında *zaten bilinen* sinyallerinden hesaplanır. Yeni oluşan bir sinyalin henüz d5'i yoktur, bu yüzden otomatik olarak dışarıda kalır — skor kendi geleceğini asla görmez. Yeni veya seyrek sinyal veren hisseler boş skor ve `mr_n = 0` alır; skor ancak çözülmüş geçmiş biriktikçe anlamlı hale gelir.
 
 ## Sonuç Takibi
 
