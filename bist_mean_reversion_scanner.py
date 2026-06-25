@@ -65,13 +65,27 @@ DATASETS = {
 }
 
 # Signal log columns (written during scan)
+#
+# New orthogonal features (raw values only — classification stays in the
+# analysis layer, never the scanner):
+#   stale         oversold-duration proxy = |gap50| - |gap20|
+#                 (fresh dip: ~0/negative; stale/old dip: positive, as EMA20
+#                  catches price). Scan-time, from the row's own gaps.
+#   mr_score      stock-specific mean-reversion tendency: mean of this ticker's
+#                 RESOLVED BELOW outcomes (enter d1 open -> exit d5 close).
+#                 Live-safe: only resolved (d5-filled) prior signals feed it, so
+#                 today's just-created row never sees its own future.
+#   mr_score_exc  same but on each prior signal's excess over that day's
+#                 universe-mean BELOW return (removes market drift).
+#   mr_n          number of prior resolved signals behind the score (confidence).
 SIGNAL_COLUMNS = [
     "scan_date", "signal_date", "ticker",
-    "close", "ema20", "ema50", "gap20_pct", "gap50_pct",
+    "close", "ema20", "ema50", "gap20_pct", "gap50_pct", "stale",
     "atr20_pct", "gap20_atr", "gap50_atr",
     "ema20_slope", "ema50_slope", "pre_momentum_5d",
     "triggers", "position", "vol_ratio", "rsi14",
     "above_count", "below_count",
+    "mr_score", "mr_score_exc", "mr_n",
     "source_index",
 ]
 
@@ -243,6 +257,11 @@ def scan_ticker(symbol: str, target_date: str | None, gap20: float, gap50: float
     rsi14 = compute_rsi(hist["Close"])
     signal_date = hist.index[-1].strftime("%Y-%m-%d")
 
+    # Oversold-duration proxy: |gap50| - |gap20|.
+    # Fresh drop -> the two gaps are similar (~0 / negative); prolonged drop ->
+    # the fast EMA20 has caught up to price, so |gap50| >> |gap20| (positive).
+    stale = abs(gap50_pct) - abs(gap20_pct)
+
     return {
         "signal_date": signal_date,
         "ticker": symbol.replace(".IS", ""),
@@ -251,6 +270,7 @@ def scan_ticker(symbol: str, target_date: str | None, gap20: float, gap50: float
         "ema50": round(ema50, 2),
         "gap20_pct": round(gap20_pct, 2),
         "gap50_pct": round(gap50_pct, 2),
+        "stale": round(stale, 2),
         "atr20_pct": round(atr20_pct, 2),
         "gap20_atr": round(gap20_atr, 2),
         "gap50_atr": round(gap50_atr, 2),
@@ -359,6 +379,66 @@ def append_to_outcomes(signals: list[dict], outcomes_path: Path, xu100_bar: dict
             writer.writerow(row)
             added += 1
     return added
+
+
+def current_mr_scores(datasets: dict) -> dict:
+    """Per-ticker stock-specific mean-reversion score from RESOLVED outcomes.
+
+    Pools every outcomes file present (a stock's bounce tendency is index-
+    independent, so XU100 names also get their XU500-scan history), keeps only
+    BELOW signals whose d5 is filled (resolved), and returns:
+
+        { bare_ticker: {"mr_score": .., "mr_score_exc": .., "mr_n": ..} }
+
+    A new signal scanned today is scored purely from prior resolved history —
+    today's just-created row has no d5 yet, so it is excluded automatically and
+    there is no look-ahead. Tickers with no resolved history simply won't appear
+    in the dict (caller assigns blank / mr_n=0).
+    """
+    frames = []
+    for ds in datasets.values():
+        p = ds["outcomes"]
+        if p.exists():
+            try:
+                frames.append(pd.read_csv(p, dtype=str, keep_default_na=False))
+            except Exception:
+                continue
+    if not frames:
+        return {}
+
+    df = pd.concat(frames, ignore_index=True)
+    df = df.drop_duplicates(["signal_date", "ticker"], keep="first")
+    # BELOW signals that have resolved (d5 filled)
+    df = df[df["trigger"].str.contains("BELOW") & (df["d5_pct"] != "")]
+    if df.empty:
+        return {}
+
+    def _ret_d5(r):
+        try:
+            sc = float(r["signal_close"]); op = float(r["d1_open"]); d5 = float(r["d5_pct"])
+            if op <= 0:
+                return None
+            return (sc * (1.0 + d5 / 100.0) - op) / op * 100.0
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    df["ret_d5"] = df.apply(_ret_d5, axis=1)
+    df = df[df["ret_d5"].notna()]
+    if df.empty:
+        return {}
+
+    df["tkr"] = df["ticker"].str.replace(".IS", "", regex=False)
+    df["day_mean"] = df.groupby("signal_date")["ret_d5"].transform("mean")
+    df["excess"] = df["ret_d5"] - df["day_mean"]
+
+    scores = {}
+    for tkr, g in df.groupby("tkr"):
+        scores[tkr] = {
+            "mr_score": round(g["ret_d5"].mean(), 2),
+            "mr_score_exc": round(g["excess"].mean(), 2),
+            "mr_n": int(len(g)),
+        }
+    return scores
 
 
 # ---------------------------------------------------------------------------
@@ -510,17 +590,22 @@ def print_table(signals: list[dict], direction: str, label: str, threshold_info:
     print(f"{'='*130}")
     print(
         f"  {'Ticker':<10} {'Close':>10} {'Gap20%':>8} {'Gap50%':>8} {'ATR%':>6} {'G20a':>6} {'G50a':>6}"
-        f" {'E20sl':>6} {'Pre5d':>7} {'VolR':>6} {'RSI':>6}  {'Position':<16} Triggers"
+        f" {'E20sl':>6} {'Pre5d':>7} {'VolR':>6} {'RSI':>6} {'Stale':>6} {'MRsc':>6} {'MRn':>4}  {'Position':<16} Triggers"
     )
     print(
         f"  {'-'*10} {'-'*10} {'-'*8} {'-'*8} {'-'*6} {'-'*6} {'-'*6}"
-        f" {'-'*6} {'-'*7} {'-'*6} {'-'*6}  {'-'*16} {'-'*20}"
+        f" {'-'*6} {'-'*7} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*4}  {'-'*16} {'-'*20}"
     )
     for s in signals:
+        mr = s.get("mr_score", "")
+        mrsc_disp = f"{mr:+.2f}" if isinstance(mr, (int, float)) else "–"
+        mrn = s.get("mr_n", 0)
+        mrn_disp = str(mrn) if mrn else "–"
         print(
             f"  {s['ticker']:<10} {s['close']:>10.2f} {s['gap20_pct']:>+8.2f} {s['gap50_pct']:>+8.2f}"
             f" {s['atr20_pct']:>6.2f} {s['gap20_atr']:>+6.1f} {s['gap50_atr']:>+6.1f}"
             f" {s['ema20_slope']:>+6.2f} {s['pre_momentum_5d']:>+7.2f} {s['vol_ratio']:>6.2f} {s['rsi14']:>6.1f}"
+            f" {s['stale']:>+6.2f} {mrsc_disp:>6} {mrn_disp:>4}"
             f"  {s['position']:<16} {s['triggers']}"
         )
     print()
@@ -622,6 +707,21 @@ def main():
     for s in all_signals:
         s["above_count"] = above_count
         s["below_count"] = below_count
+
+    # Stock-specific mean-reversion score from prior RESOLVED outcomes.
+    # Pools both indices' outcomes; today's unresolved rows are excluded, so the
+    # lookup is look-ahead-free. New / rare tickers get blank score, mr_n=0.
+    mr_scores = current_mr_scores(DATASETS)
+    for s in all_signals:
+        sc = mr_scores.get(s["ticker"])
+        if sc:
+            s["mr_score"] = sc["mr_score"]
+            s["mr_score_exc"] = sc["mr_score_exc"]
+            s["mr_n"] = sc["mr_n"]
+        else:
+            s["mr_score"] = ""
+            s["mr_score_exc"] = ""
+            s["mr_n"] = 0
 
     above.sort(key=lambda s: -max(abs(s["gap20_pct"]), abs(s["gap50_pct"])))
     below.sort(key=lambda s: -max(abs(s["gap20_pct"]), abs(s["gap50_pct"])))
